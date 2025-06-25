@@ -5,42 +5,55 @@ import axios from 'axios';
 // 這裡僅為 MVP 演示。真實產品會用更安全的方式管理密鑰。
 // 這個 API 的核心目標是：接收用戶的公鑰和要交換的代幣信息，然後返回一個需要用戶簽名的交易。
 
+// **注意：這個 API 現在接收一個購物車數組**
 export async function POST(request: Request) {
     try {
-        const { userPublicKey, tokenToRecycle } = await request.json();
+        const { userPublicKey, cartItems } = await request.json();
 
-        if (!userPublicKey || !tokenToRecycle || !tokenToRecycle.mint || !tokenToRecycle.amountInLamports) {
+        if (!userPublicKey || !cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
             return NextResponse.json({ error: '請求參數不完整或格式錯誤' }, { status: 400 });
         }
-
-        console.log(`[RECYCLE API] 收到回收請求: ${tokenToRecycle.amountInLamports} of ${tokenToRecycle.mint} for ${userPublicKey}`);
-
+        
         const SOL_MINT = 'So11111111111111111111111111111111111111112';
+        // **演示用的固定獎池地址，記得換成你自己的**
+        const POOL_ADDRESS = "84Yf6W8BbZDBpMrbXM8R9yNJrV1sVf1k8xjsskFMPdVt"; 
+        const FEE_BPS = 500; // 5%
 
-        // 1. 從 Jupiter API 獲取報價
-        const quoteResponse = await axios.get('https://quote-api.jup.ag/v6/quote', {
-            params: {
-                inputMint: tokenToRecycle.mint,
-                outputMint: SOL_MINT,
-                amount: tokenToRecycle.amountInLamports,
+        // 1. 並行獲取所有代幣的報價
+        const quotePromises = cartItems.map(item => {
+            const amountInLamports = Math.floor(item.amountToSell * Math.pow(10, item.decimals));
+            return axios.get('https://quote-api.jup.ag/v6/quote', {
+                params: {
+                    inputMint: item.mint,
+                    outputMint: SOL_MINT,
+                    amount: amountInLamports.toString(),
+                    userPublicKey: userPublicKey,
+                    slippageBps: 150,
+                }
+            }).then(res => res.data);
+        });
+
+        const quotes = await Promise.all(quotePromises);
+
+        // 2. 並行獲取所有交換交易
+        const swapPromises = quotes.map(quote => {
+            const feeAmount = Math.floor(parseInt(quote.outAmount) * FEE_BPS / 10000);
+            return axios.post('https://quote-api.jup.ag/v6/swap', {
+                quoteResponse: quote,
                 userPublicKey: userPublicKey,
-                slippageBps: 150 // 滑點增加到 1.5%，提高 Devnet 成功率
-            }
-        }).then(res => res.data);
+                wrapAndUnwrapSol: true,
+                feeAccount: POOL_ADDRESS,
+                feeAmount: feeAmount.toString(),
+            }).then(res => res.data.swapTransaction);
+        });
 
-        // 2. 從 Jupiter API 獲取交換交易數據
-        const { swapTransaction } = await axios.post('https://quote-api.jup.ag/v6/swap', {
-            quoteResponse,
-            userPublicKey: userPublicKey,
-            wrapAndUnwrapSol: true,
-        }).then(res => res.data);
+        const swapTransactions = await Promise.all(swapPromises);
 
-        // 3. 將 base64 編碼的交易返回給前端
-        return NextResponse.json({ swapTransaction });
+        // 3. 將 base64 編碼的交易數組返回給前端
+        return NextResponse.json({ swapTransactions });
 
     } catch (error: any) {
-        // 提供更詳細的錯誤日誌
-        console.error('[RECYCLE API ERROR]', error.response ? error.response.data : error.message);
-        return NextResponse.json({ error: '獲取交換數據失敗', details: error.response ? error.response.data : error.message }, { status: 500 });
+         // ... (詳細的錯誤處理)
+         return NextResponse.json({ error: error.message || 'Unknown error' }, { status: 500 });
     }
 } 

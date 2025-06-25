@@ -1,4 +1,15 @@
 import { NextResponse } from 'next/server';
+import axios from 'axios';
+
+// 定義 token 型別，確保有 name, symbol, logoURI
+interface TokenInfo {
+    mint: string;
+    balance: number;
+    value: number;
+    name: string;
+    symbol: string;
+    logoURI: string | null;
+}
 
 export async function POST(request: Request) {
     // 這裡應根據 userPublicKey 查詢鏈上資產，這裡先回傳假資料
@@ -26,5 +37,19 @@ export async function POST(request: Request) {
             logoURI: '',
         },
     ];
-    return NextResponse.json(tokens);
+
+    const tokenListResponse = await axios.get('https://token.jup.ag/all');
+    const tokenMap = new Map(tokenListResponse.data.map((t: any) => [t.address, t]));
+
+    const updatedTokens: TokenInfo[] = tokens.map((info: any) => {
+        const tokenInfo: any = tokenMap.get(info.mint);
+        return {
+            ...info,
+            name: tokenInfo && typeof tokenInfo === 'object' ? tokenInfo.name || 'Unknown Token' : 'Unknown Token',
+            symbol: tokenInfo && typeof tokenInfo === 'object' ? tokenInfo.symbol || 'UNKNOWN' : 'UNKNOWN',
+            logoURI: tokenInfo && typeof tokenInfo === 'object' ? tokenInfo.logoURI || null : null,
+        };
+    });
+
+    return NextResponse.json(updatedTokens);
 } 

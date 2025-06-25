@@ -4,9 +4,10 @@ import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import ClientWalletMultiButton from './components/ClientWalletMultiButton';
 import { VersionedTransaction } from '@solana/web3.js';
 import axios from 'axios';
-import { useAppStore } from './store';
-import toast from 'react-hot-toast';
+import { useAppStore, TokenInfo, CartItem } from './store';
+import toast, { Toaster } from 'react-hot-toast';
 import dynamic from 'next/dynamic';
+import Image from 'next/image';
 
 const LANGS = {
   en: {
@@ -47,99 +48,142 @@ const LANGS = {
 
 const ClientOnlyWalletButton = dynamic(() => import('./components/ClientOnlyWalletButton'), { ssr: false });
 
-const TokenRow: React.FC<{ token: any; lang: 'en' | 'zh'; t: any }> = ({ token, lang, t }) => {
-    const { connection } = useConnection();
-    const { publicKey, sendTransaction } = useWallet();
-    const [isRecycling, setIsRecycling] = useState(false);
+const AssetRow: React.FC<{ token: TokenInfo }> = ({ token }) => {
+    const { addToCart, cart } = useAppStore();
+    const isInCart = cart.some(item => item.mint === token.mint);
 
-    const handleRecycleOne = async () => {
-        if (!publicKey || !sendTransaction) {
-            toast.error(t.connectWallet);
-            return;
-        }
-        setIsRecycling(true);
-
-        try {
-            const amountInLamports = Math.floor(token.balance * Math.pow(10, token.decimals));
-
-            const { data } = await axios.post('/api/recycle', {
-                userPublicKey: publicKey.toBase58(),
-                tokenToRecycle: {
-                    mint: token.mint,
-                    amountInLamports: amountInLamports.toString(), // 確保是大數安全字符串
-                },
-            });
-
-            const { swapTransaction } = data;
-            const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
-            const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-            const txid = await sendTransaction(transaction, connection);
-            
-            console.log(`交易發送中... ${txid}`);
-            await connection.confirmTransaction(txid, 'confirmed');
-            
-            toast.success(<span>{t.txSuccess}<a href={`https://explorer.solana.com/tx/${txid}?cluster=devnet`} target="_blank" rel="noopener noreferrer" className="underline ml-2">{t.viewTx}</a></span>);
-            // 你可以在這裡觸發重新掃描錢包的函數
-        } catch (error) {
-            console.error(`回收 ${token.mint} 失敗:`, error);
-            toast.error(t.txFail);
-        } finally {
-            setIsRecycling(false);
-        }
+    const handleAdd = () => {
+        addToCart({ ...token, amountToSell: token.balance, valueToSell: token.value });
     };
 
     return (
-        <li className="flex flex-col items-center p-3 bg-gray-800 rounded-lg">
-            <div className="w-full flex flex-col items-center">
-                <p className="font-bold">{token.mint.slice(0, 4)}...{token.mint.slice(-4)}</p>
-                <p className="text-sm text-gray-400">{token.balance.toFixed(4)}</p>
-                <p className="font-semibold mt-1">${token.value.toFixed(2)}</p>
-                <button
-                    onClick={handleRecycleOne}
-                    disabled={isRecycling}
-                    className="mt-2 px-4 py-2 text-sm bg-blue-600 rounded hover:bg-blue-700 disabled:bg-gray-500 transition-colors w-32 text-center"
+        <li className="flex justify-between items-center p-3 bg-gray-800/50 rounded-lg hover:bg-gray-700/50 transition-colors">
+            <div className="flex items-center gap-3">
+                <Image src={token.logoURI || '/default-logo.svg'} alt={token.name} width={40} height={40} className="rounded-full" />
+                <div>
+                    <p className="font-bold">{token.symbol}</p>
+                    <p className="text-sm text-gray-400">{token.balance.toFixed(4)}</p>
+                </div>
+            </div>
+            <div className="text-right">
+                <p className="font-semibold">${token.value.toFixed(2)}</p>
+                <button 
+                    onClick={handleAdd} 
+                    disabled={isInCart}
+                    className="mt-1 px-3 py-1 text-sm bg-blue-600 rounded hover:bg-blue-700 disabled:bg-gray-500 transition-colors"
                 >
-                    {isRecycling ? t.recycling : t.recycle}
+                    {isInCart ? '已添加' : '添加'}
                 </button>
             </div>
         </li>
     );
 };
 
-const TokenList: React.FC<{ lang: 'en' | 'zh'; t: any }> = ({ lang, t }) => {
-    const { tokens, totalValue } = useAppStore();
-    if (tokens.length === 0) return <p className="mt-8 text-center">{t.fetchFail}</p>;
+const ShoppingCart: React.FC = () => {
+    const { cart, cartTotalValue, updateCartItem, removeFromCart, clearCart } = useAppStore();
+    const { publicKey, sendTransaction, signAllTransactions } = useWallet();
+    const { connection } = useConnection();
+    const [isRecycling, setIsRecycling] = useState(false);
+
+    const handleCheckout = async () => {
+        if (!publicKey || !sendTransaction || !signAllTransactions) return;
+        setIsRecycling(true);
+        const loadingToast = toast.loading('正在準備交易...');
+        try {
+            // 1. 調用後端 API 獲取交易數組
+            const { data } = await axios.post('/api/recycle', {
+                userPublicKey: publicKey.toBase58(),
+                cartItems: cart,
+            });
+            const { swapTransactions } = data; // 這是一個 base64 字符串數組
+            toast.dismiss(loadingToast);
+            // 2. 反序列化所有交易
+            const transactions = swapTransactions.map((txString: string) => {
+                const buf = Buffer.from(txString, 'base64');
+                return VersionedTransaction.deserialize(buf);
+            });
+            // **關鍵：讓用戶一次性簽署所有交易**
+            const signedTransactions = await signAllTransactions(transactions);
+            toast.loading('正在發送交易...請勿關閉頁面');
+            // 3. 循環發送已簽名的交易
+            const txids = [];
+            for (const signedTx of signedTransactions) {
+                const rawTx = signedTx.serialize();
+                const txid = await connection.sendRawTransaction(rawTx, { skipPreflight: true });
+                txids.push(txid);
+            }
+            toast.dismiss();
+            toast.success(`成功發送 ${txids.length} 筆回收交易！`, { duration: 8000 });
+            console.log("交易ID:", txids);
+            clearCart(); // 清空購物車
+            // 可以在這裡延遲幾秒後觸發錢包刷新
+        } catch (error) {
+            toast.dismiss();
+            toast.error('結算失敗，可能是您拒絕了簽名或發生了網絡錯誤。');
+            console.error('結算失敗:', error);
+        } finally {
+            setIsRecycling(false);
+        }
+    };
+
+    if (cart.length === 0) return null;
+
     return (
-        <div className="w-full max-w-lg mt-8 mx-auto">
-            <h2 className="text-2xl font-bold mb-4 text-center">
-                {t.myAssets} ({t.value}: ${totalValue.toFixed(2)})
-            </h2>
-            <ul className="space-y-3">
-                {tokens.map(token => <TokenRow key={token.mint} token={token} lang={lang} t={t} />)}
+        <div className="w-full max-w-lg p-4 mt-8 bg-green-900/20 rounded-xl border border-green-500/30">
+            <h3 className="text-xl font-bold mb-4">回收購物車</h3>
+            <ul className="space-y-3 mb-4">
+                {cart.map(item => (
+                    <li key={item.mint} className="flex items-center justify-between gap-2 p-2 bg-gray-800 rounded">
+                        <Image src={item.logoURI || '/default-logo.svg'} alt={item.name} width={32} height={32} className="rounded-full" />
+                        <span className="font-bold flex-1">{item.symbol}</span>
+                        <input 
+                            type="number"
+                            max={item.balance}
+                            min={0}
+                            value={item.amountToSell}
+                            onChange={(e) => updateCartItem(item.mint, parseFloat(e.target.value) || 0)}
+                            className="w-24 p-1 bg-gray-900 rounded text-right"
+                        />
+                        <button onClick={() => removeFromCart(item.mint)} className="text-red-500 hover:text-red-400">×</button>
+                    </li>
+                ))}
             </ul>
+            <div className="border-t border-gray-700 pt-4 flex justify-between items-center">
+                <div>
+                    <p className="text-lg font-bold">總計: ${cartTotalValue.toFixed(2)}</p>
+                    <p className="text-xs text-gray-400">預計手續費: 5%</p>
+                </div>
+                <button 
+                    onClick={handleCheckout} 
+                    disabled={isRecycling}
+                    className="px-6 py-2 font-bold text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:bg-gray-500 transition-colors"
+                >
+                    {isRecycling ? '结算中...' : '確認回收'}
+                </button>
+            </div>
         </div>
     );
 };
 
 export default function HomePage() {
     const { publicKey } = useWallet();
-    const { setTokens, isLoading, setIsLoading } = useAppStore();
+    const { walletTokens, setWalletTokens, isLoading, setIsLoading } = useAppStore();
     const [lang, setLang] = useState<'en'|'zh'>('en');
     const t = LANGS[lang];
 
     useEffect(() => {
         const fetchTokens = async () => {
             if (!publicKey) {
-                setTokens([]);
+                setWalletTokens([]);
                 return;
             }
             setIsLoading(true);
             try {
                 const { data } = await axios.post('/api/scan', { userPublicKey: publicKey.toBase58() });
-                setTokens(data);
+                setWalletTokens(data);
             } catch (error) {
                 console.error("獲取代幣列表失敗:", error);
-                setTokens([]);
+                setWalletTokens([]);
             } finally {
                 setIsLoading(false);
             }
@@ -148,10 +192,11 @@ export default function HomePage() {
         // 設置定時器，每30秒刷新一次
         const interval = setInterval(fetchTokens, 30000);
         return () => clearInterval(interval);
-    }, [publicKey, setTokens, setIsLoading]);
+    }, [publicKey, setWalletTokens, setIsLoading]);
 
     return (
         <main className="flex flex-col items-center justify-start min-h-screen p-8 pt-24 bg-gray-900">
+            <Toaster position="top-center" reverseOrder={false} />
             <div className="absolute top-8 right-8">
                 <ClientWalletMultiButton />
             </div>
@@ -159,11 +204,34 @@ export default function HomePage() {
                 <h1 className="text-5xl font-extrabold mb-3">{t.title}</h1>
                 <p className="text-lg text-gray-400">{t.slogan}</p>
             </div>
-            {publicKey ? (
-                isLoading ? <p className="mt-8 text-xl text-center">{t.recycling}</p> : <TokenList lang={lang} t={t} />
-            ) : (
-                <p className="mt-8 text-xl text-center">{t.connectWallet}</p>
-            )}
+            <div className="mt-10 w-full max-w-lg p-4 bg-gray-800/50 rounded-xl">
+                <h3 className="text-center text-2xl font-bold mb-4">社區獎池</h3>
+                <div className="flex justify-around">
+                    <div className="text-center">
+                        <p className="text-sm text-gray-400">每日 SOL 獎池</p>
+                        <p className="text-2xl font-bold text-green-400">0.125 SOL</p>
+                    </div>
+                    <div className="text-center">
+                        <p className="text-sm text-gray-400">終極 wBTC 大獎</p>
+                        <p className="text-2xl font-bold text-orange-400">0.001 wBTC</p>
+                    </div>
+                </div>
+            </div>
+            <div className="w-full max-w-lg mt-8">
+                <h2 className="text-2xl font-bold mb-4">我的資產</h2>
+                {publicKey ? (
+                    isLoading 
+                        ? <p>正在掃描您的錢包...</p> 
+                        : (walletTokens.length > 0 ? (
+                            <ul className="space-y-3">{walletTokens.map(token => <AssetRow key={token.mint} token={token} />)}</ul>
+                          ) : (
+                            <p>您的錢包中沒有找到可回收資產。</p>
+                          ))
+                ) : (
+                    <p>請先連接錢包以掃描資產。</p>
+                )}
+            </div>
+            <ShoppingCart />
         </main>
     );
 }
