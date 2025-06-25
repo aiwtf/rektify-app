@@ -1,8 +1,5 @@
 import { NextResponse } from 'next/server';
-import { Connection, PublicKey } from '@solana/web3.js';
-import { createJupiterApiClient } from '@jup-ag/api';
-
-const jupiterApi = createJupiterApiClient();
+import axios from 'axios';
 
 // 重要的安全提示：在真實產品中，你不應該將服務器的私鑰暴露在這裡。
 // 這裡僅為 MVP 演示。真實產品會用更安全的方式管理密鑰。
@@ -10,47 +7,40 @@ const jupiterApi = createJupiterApiClient();
 
 export async function POST(request: Request) {
     try {
-        const { userPublicKey, tokensToRecycle } = await request.json();
-        if (!userPublicKey || !tokensToRecycle || tokensToRecycle.length === 0) {
-            return NextResponse.json({ error: '參數不完整' }, { status: 400 });
+        const { userPublicKey, tokenToRecycle } = await request.json();
+
+        if (!userPublicKey || !tokenToRecycle || !tokenToRecycle.mint || !tokenToRecycle.amountInLamports) {
+            return NextResponse.json({ error: '請求參數不完整或格式錯誤' }, { status: 400 });
         }
 
-        const user = new PublicKey(userPublicKey);
-        const connection = new Connection(process.env.DEVNET_RPC_URL || 'https://api.devnet.solana.com');
+        console.log(`[RECYCLE API] 收到回收請求: ${tokenToRecycle.amountInLamports} of ${tokenToRecycle.mint} for ${userPublicKey}`);
+
         const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
-        // 1. 為每個代幣獲取 quote
-        const quotes = await Promise.all(
-            tokensToRecycle.map(token =>
-                jupiterApi.quoteGet({
-                    inputMint: token.mint,
-                    outputMint: SOL_MINT,
-                    amount: token.amountInLamports,
-                    userPublicKey: user.toBase58(),
-                    slippageBps: 100
-                })
-            )
-        );
+        // 1. 從 Jupiter API 獲取報價
+        const quoteResponse = await axios.get('https://quote-api.jup.ag/v6/quote', {
+            params: {
+                inputMint: tokenToRecycle.mint,
+                outputMint: SOL_MINT,
+                amount: tokenToRecycle.amountInLamports,
+                userPublicKey: userPublicKey,
+                slippageBps: 150 // 滑點增加到 1.5%，提高 Devnet 成功率
+            }
+        }).then(res => res.data);
 
-        // 2. 拿到 swap 交易
-        const transactions = await Promise.all(
-            quotes.map(quote =>
-                jupiterApi.swapPost({
-                    swapRequest: {
-                        quoteResponse: quote,
-                        userPublicKey: user.toBase58(),
-                        wrapAndUnwrapSol: true,
-                    }
-                })
-            )
-        );
+        // 2. 從 Jupiter API 獲取交換交易數據
+        const { swapTransaction } = await axios.post('https://quote-api.jup.ag/v6/swap', {
+            quoteResponse,
+            userPublicKey: userPublicKey,
+            wrapAndUnwrapSol: true,
+        }).then(res => res.data);
 
-        const swapTransactions = transactions.map(t => t.swapTransaction);
+        // 3. 將 base64 編碼的交易返回給前端
+        return NextResponse.json({ swapTransaction });
 
-        return NextResponse.json({ swapTransactions });
-
-    } catch (error) {
-        console.error('[RECYCLE API ERROR]', error);
-        return NextResponse.json({ error: '回收失敗' }, { status: 500 });
+    } catch (error: any) {
+        // 提供更詳細的錯誤日誌
+        console.error('[RECYCLE API ERROR]', error.response ? error.response.data : error.message);
+        return NextResponse.json({ error: '獲取交換數據失敗', details: error.response ? error.response.data : error.message }, { status: 500 });
     }
 } 

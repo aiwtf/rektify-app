@@ -1,9 +1,9 @@
 "use client";
+import React, { useEffect, useState } from 'react';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
-import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
+import ClientWalletMultiButton from './components/ClientWalletMultiButton';
 import { VersionedTransaction } from '@solana/web3.js';
 import axios from 'axios';
-import React, { useEffect, useState } from 'react';
 import { useAppStore } from './store';
 import toast from 'react-hot-toast';
 import dynamic from 'next/dynamic';
@@ -47,155 +47,123 @@ const LANGS = {
 
 const ClientOnlyWalletButton = dynamic(() => import('./components/ClientOnlyWalletButton'), { ssr: false });
 
-export default function HomePage() {
+const TokenRow: React.FC<{ token: any; lang: 'en' | 'zh'; t: any }> = ({ token, lang, t }) => {
     const { connection } = useConnection();
     const { publicKey, sendTransaction } = useWallet();
-    const { tokens, setTokens, totalValue, isLoading, setIsLoading } = useAppStore();
-    const [tokenMap, setTokenMap] = useState<Record<string, any>>({});
-    const [lang, setLang] = useState<'en'|'zh'>('en');
-    const t = LANGS[lang];
+    const [isRecycling, setIsRecycling] = useState(false);
 
-    // 拉取 Jupiter Token List
-    useEffect(() => {
-        const fetchTokenList = async () => {
-            const res = await fetch('https://token.jup.ag/all');
-            const list: any[] = await res.json();
-            const map: Record<string, any> = {};
-            list.forEach((token: any) => { map[token.address] = token; });
-            setTokenMap(map);
-        };
-        fetchTokenList();
-    }, []);
-
-    // 假設這裡有一個獲取用戶資產的函數（你可根據實際情況替換）
-    const fetchUserTokens = async () => {
-        if (!publicKey) return;
-        setIsLoading(true);
-        try {
-            // 這裡用假數據，實際應該從鏈上獲取
-            const userTokens = [
-                { mint: 'So11111111111111111111111111111111111111112', balance: 0.01, price: 150, value: 1.5, tokenAccountAddress: '', decimals: 9 },
-                { mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', balance: 10, price: 1, value: 10, tokenAccountAddress: '', decimals: 6 },
-            ];
-            // 補全 name, symbol, logoURI
-            const tokensWithMeta = userTokens.map(t => ({
-                ...t,
-                name: tokenMap[t.mint]?.name || t.mint,
-                symbol: tokenMap[t.mint]?.symbol || '',
-                logoURI: tokenMap[t.mint]?.logoURI || '',
-            }));
-            setTokens(tokensWithMeta);
-        } catch (e) {
-            toast.error(t.fetchFail);
-        }
-        setIsLoading(false);
-    };
-
-    useEffect(() => {
-        if (publicKey && Object.keys(tokenMap).length > 0) {
-            fetchUserTokens();
-        }
-        // eslint-disable-next-line
-    }, [publicKey, tokenMap]);
-
-    const handleRecycle = async () => {
+    const handleRecycleOne = async () => {
         if (!publicKey || !sendTransaction) {
             toast.error(t.connectWallet);
             return;
         }
-        setIsLoading(true);
+        setIsRecycling(true);
+
         try {
-            // 這裡只演示回收第一個 token
-            const inputMint = tokens[0]?.mint;
-            const outputMint = 'So11111111111111111111111111111111111111112'; // wSOL
-            const amount = Math.floor(tokens[0]?.balance * Math.pow(10, tokens[0]?.decimals));
+            const amountInLamports = Math.floor(token.balance * Math.pow(10, token.decimals));
+
             const { data } = await axios.post('/api/recycle', {
                 userPublicKey: publicKey.toBase58(),
-                inputMint,
-                outputMint,
-                amount,
+                tokenToRecycle: {
+                    mint: token.mint,
+                    amountInLamports: amountInLamports.toString(), // 確保是大數安全字符串
+                },
             });
+
             const { swapTransaction } = data;
             const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
             const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
             const txid = await sendTransaction(transaction, connection);
-            const latestBlockHash = await connection.getLatestBlockhash();
-            await connection.confirmTransaction({
-                blockhash: latestBlockHash.blockhash,
-                lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
-                signature: txid,
-            });
+            
+            console.log(`交易發送中... ${txid}`);
+            await connection.confirmTransaction(txid, 'confirmed');
+            
             toast.success(<span>{t.txSuccess}<a href={`https://explorer.solana.com/tx/${txid}?cluster=devnet`} target="_blank" rel="noopener noreferrer" className="underline ml-2">{t.viewTx}</a></span>);
+            // 你可以在這裡觸發重新掃描錢包的函數
         } catch (error) {
-            console.error('回收失敗:', error);
+            console.error(`回收 ${token.mint} 失敗:`, error);
             toast.error(t.txFail);
+        } finally {
+            setIsRecycling(false);
         }
-        setIsLoading(false);
     };
 
     return (
-        <main className="flex flex-col items-center justify-center min-h-screen p-24 bg-gray-50">
-            <div className="absolute top-8 right-8 flex items-center space-x-4">
-                <ClientOnlyWalletButton />
-                <div className="relative">
-                  <button className="px-3 py-1 bg-white border rounded shadow hover:bg-gray-100" onClick={() => setLang(lang === 'en' ? 'zh' : 'en')}>
-                    {t.lang}: {lang === 'en' ? t.en : t.zh}
-                  </button>
-                </div>
+        <li className="flex flex-col items-center p-3 bg-gray-800 rounded-lg">
+            <div className="w-full flex flex-col items-center">
+                <p className="font-bold">{token.mint.slice(0, 4)}...{token.mint.slice(-4)}</p>
+                <p className="text-sm text-gray-400">{token.balance.toFixed(4)}</p>
+                <p className="font-semibold mt-1">${token.value.toFixed(2)}</p>
+                <button
+                    onClick={handleRecycleOne}
+                    disabled={isRecycling}
+                    className="mt-2 px-4 py-2 text-sm bg-blue-600 rounded hover:bg-blue-700 disabled:bg-gray-500 transition-colors w-32 text-center"
+                >
+                    {isRecycling ? t.recycling : t.recycle}
+                </button>
+            </div>
+        </li>
+    );
+};
+
+const TokenList: React.FC<{ lang: 'en' | 'zh'; t: any }> = ({ lang, t }) => {
+    const { tokens, totalValue } = useAppStore();
+    if (tokens.length === 0) return <p className="mt-8 text-center">{t.fetchFail}</p>;
+    return (
+        <div className="w-full max-w-lg mt-8 mx-auto">
+            <h2 className="text-2xl font-bold mb-4 text-center">
+                {t.myAssets} ({t.value}: ${totalValue.toFixed(2)})
+            </h2>
+            <ul className="space-y-3">
+                {tokens.map(token => <TokenRow key={token.mint} token={token} lang={lang} t={t} />)}
+            </ul>
+        </div>
+    );
+};
+
+export default function HomePage() {
+    const { publicKey } = useWallet();
+    const { setTokens, isLoading, setIsLoading } = useAppStore();
+    const [lang, setLang] = useState<'en'|'zh'>('en');
+    const t = LANGS[lang];
+
+    useEffect(() => {
+        const fetchTokens = async () => {
+            if (!publicKey) {
+                setTokens([]);
+                return;
+            }
+            setIsLoading(true);
+            try {
+                const { data } = await axios.post('/api/scan', { userPublicKey: publicKey.toBase58() });
+                setTokens(data);
+            } catch (error) {
+                console.error("獲取代幣列表失敗:", error);
+                setTokens([]);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+        fetchTokens();
+        // 設置定時器，每30秒刷新一次
+        const interval = setInterval(fetchTokens, 30000);
+        return () => clearInterval(interval);
+    }, [publicKey, setTokens, setIsLoading]);
+
+    return (
+        <main className="flex flex-col items-center justify-start min-h-screen p-8 pt-24 bg-gray-900">
+            <div className="absolute top-8 right-8">
+                <ClientWalletMultiButton />
             </div>
             <div className="text-center w-full">
-                <h1 className="text-4xl font-bold mb-4">{t.title}</h1>
-                <p className="mb-8">{t.slogan}</p>
-                {publicKey ? (
-                    <>
-                        <div className="mb-8 w-full max-w-2xl mx-auto">
-                            <h2 className="text-2xl font-semibold mb-4">{t.myAssets}</h2>
-                            {isLoading ? (
-                                <div className="flex justify-center items-center h-32"><div className="loader"></div></div>
-                            ) : (
-                                <ul className="space-y-3">
-                                    {tokens.map(token => (
-                                        <li key={token.mint} className="flex items-center bg-white rounded-lg shadow p-3 w-full">
-                                            {token.logoURI ? (
-                                                <img src={token.logoURI} alt={token.symbol} className="w-12 h-12 mr-4 rounded-full border object-cover" />
-                                            ) : (
-                                                <div className="w-12 h-12 mr-4 rounded-full bg-gray-200" />
-                                            )}
-                                            <div className="flex-1 text-left">
-                                                <div className="font-bold text-lg">{token.name} <span className="text-xs text-gray-500">{token.symbol}</span></div>
-                                                <div className="text-sm text-gray-600">{t.balance}: {token.balance}，{t.value}: ${token.value.toFixed(2)}</div>
-                                            </div>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
-                        </div>
-                        <button
-                            onClick={handleRecycle}
-                            className="px-6 py-3 font-bold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
-                            disabled={isLoading || tokens.length === 0}
-                        >
-                            {isLoading ? t.recycling : t.recycle}
-                        </button>
-                    </>
-                ) : (
-                    <p>{t.connectWallet}</p>
-                )}
+                <h1 className="text-5xl font-extrabold mb-3">{t.title}</h1>
+                <p className="text-lg text-gray-400">{t.slogan}</p>
             </div>
-            <style jsx>{`
-                .loader {
-                    border: 4px solid #f3f3f3;
-                    border-top: 4px solid #3498db;
-                    border-radius: 50%;
-                    width: 32px;
-                    height: 32px;
-                    animation: spin 1s linear infinite;
-                }
-                @keyframes spin {
-                    0% { transform: rotate(0deg); }
-                    100% { transform: rotate(360deg); }
-                }
-            `}</style>
+            {publicKey ? (
+                isLoading ? <p className="mt-8 text-xl text-center">{t.recycling}</p> : <TokenList lang={lang} t={t} />
+            ) : (
+                <p className="mt-8 text-xl text-center">{t.connectWallet}</p>
+            )}
         </main>
     );
 }
