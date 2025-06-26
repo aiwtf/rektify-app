@@ -8,6 +8,7 @@ import { useAppStore, TokenInfo, CartItem } from './store';
 import toast, { Toaster } from 'react-hot-toast';
 import dynamic from 'next/dynamic';
 import Image from 'next/image';
+import PortfolioTable from './components/PortfolioTable';
 
 const LANGS = {
   en: {
@@ -221,14 +222,14 @@ export default function HomePage() {
                 <h2 className="text-2xl font-bold mb-4">我的資產</h2>
                 {publicKey ? (
                     isLoading 
-                        ? <p>正在掃描您的錢包...</p> 
+                        ? <p className="mt-8 text-xl">正在掃描您的錢包...</p> 
                         : (walletTokens.length > 0 ? (
-                            <ul className="space-y-3">{walletTokens.map(token => <AssetRow key={token.mint} token={token} />)}</ul>
+                            <PortfolioTable />
                           ) : (
-                            <p>您的錢包中沒有找到可回收資產。</p>
+                            <p className="mt-8">您的錢包中沒有找到可回收資產。</p>
                           ))
                 ) : (
-                    <p>請先連接錢包以掃描資產。</p>
+                    <p className="mt-8 text-xl">請先連接錢包以掃描資產。</p>
                 )}
             </div>
             <ShoppingCart />
